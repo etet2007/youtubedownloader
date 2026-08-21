@@ -108,32 +108,32 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     """
     用 yt-dlp 下载最佳视频+音频和字幕。
 
+    分两阶段：先下载视频，再单独尝试下载字幕。
+    字幕下载失败（如 429）不会中断流程，仅输出警告。
+
     返回 dict:
         video_path  — 合并后的视频文件路径
         subtitle    — srt 字幕路径（若无可用字幕则为 None）
         title       — 视频标题
     """
+    import yt_dlp
+
+    sub_lang_list = [l.strip() for l in sub_langs.split(",") if l.strip()]
     outtmpl = str(out_dir / "%(title)s.%(ext)s")
 
-    ydl_opts = {
+    # ---- 阶段 1: 下载视频+音频（不含字幕）----
+    print(f"[1/3] 下载视频: {url}")
+    video_opts = {
         "outtmpl": outtmpl,
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mkv",
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": [l.strip() for l in sub_langs.split(",")],
-        "subtitlesformat": "srt/best",
         "postprocessors": [
             {"key": "FFmpegVideoConvertor", "preferedformat": "mkv"},
         ],
     }
 
-    import yt_dlp
-
-    print(f"[1/3] 下载视频 + 字幕: {url}")
-
     info: dict = {}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(video_opts) as ydl:
         info = ydl.extract_info(url, download=True)
 
     title = info.get("title", "video")
@@ -152,11 +152,41 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
 
     print(f"      视频文件: {video_path.name}")
 
+    # ---- 阶段 2: 逐个语言尝试下载字幕（容错）----
+    # yt-dlp 在任一语言字幕下载失败时会报错退出，
+    # 因此逐个语言单独尝试，避免一种语言 429 阻断其他语言。
+    print(f"[2/3] 下载字幕 (语言优先级: {', '.join(sub_lang_list)})")
+    for lang in sub_lang_list:
+        sub_opts = {
+            "outtmpl": str(video_path.with_suffix("")),
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": [lang],
+            "subtitlesformat": "srt/best",
+            "quiet": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                ydl.extract_info(url, download=True)
+            # 检查文件是否实际生成（yt-dlp 在无该语言字幕时会静默跳过）
+            stem = video_path.stem
+            candidates = list(out_dir.glob(f"{stem}.{lang}.*"))
+            candidates += list(out_dir.glob(f"{stem}.{lang}"))
+            if candidates:
+                print(f"      字幕 '{lang}' 下载成功: {candidates[0].name}")
+                break
+            else:
+                print(f"      字幕 '{lang}' 不存在（视频无该语言字幕）")
+                continue
+        except Exception as e:
+            print(f"      字幕 '{lang}' 下载失败: {e}")
+            continue
+
     # 查找字幕文件 — 按语言优先级
     subtitle: Path | None = None
     stem = video_path.stem
-    for lang in sub_langs.split(","):
-        lang = lang.strip()
+    for lang in sub_lang_list:
         candidates = list(out_dir.glob(f"{stem}.{lang}.*"))
         candidates += list(out_dir.glob(f"{stem}.{lang}"))
         if candidates:
@@ -174,7 +204,7 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     if subtitle:
         print(f"      字幕文件: {subtitle.name}")
     else:
-        print("      未找到字幕（视频可能无字幕），将仅输出无字幕视频。")
+        print("      未找到字幕（视频可能无字幕或字幕下载失败），将仅输出无字幕视频。")
 
     return {"video_path": video_path, "subtitle": subtitle, "title": title}
 
@@ -185,7 +215,7 @@ def convert_to_srt(subtitle: Path, out_dir: Path) -> Path:
         return subtitle
 
     srt_path = out_dir / (subtitle.stem + ".srt")
-    print(f"[2/3] 转换字幕为 SRT: {subtitle.name} -> {srt_path.name}")
+    print(f"      转换字幕为 SRT: {subtitle.name} -> {srt_path.name}")
     run(
         [FFMPEG_BIN, "-y", "-i", str(subtitle), "-c:s", "srt", str(srt_path)],
         capture_output=True,
