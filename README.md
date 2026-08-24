@@ -72,4 +72,14 @@ brew install ffmpeg-full
    - 软字幕: -c copy -c:s mov_text（无损、快）
    - 硬字幕: -vf subtitles=... -c:v libx264（烧录、慢）
 4. 清理中间文件（除非 --keep-temp）
+
+## 批量下载
+
+`batch_download.py` 可批量下载一个系列的所有视频。修改脚本中的 `VIDEOS` 列表填入视频 ID 和集号即可：
+
+```bash
+.venv/bin/python batch_download.py
+```
+
+脚本会逐集调用 `ytdl.py` 下载，每集超时 10 分钟，完成后输出成功/失败统计。
 ```
