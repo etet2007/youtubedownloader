@@ -15,9 +15,8 @@ YouTubeDownloader — 下载音视频 + 字幕并合成一个视频文件。
     python3 ytdl.py "https://youtu.be/xxxx" -o ./output --burn --sub-langs zh,en
 """
 
-from __future__ import annotations
-
 import argparse
+import fnmatch
 import re
 import shutil
 import subprocess
@@ -104,6 +103,21 @@ def check_deps(burn: bool = False) -> None:
         sys.exit("[ERROR] 缺少依赖: ffmpeg。请先安装。")
 
 
+def find_subtitle_files(out_dir: Path, stem: str, lang: str) -> list[Path]:
+    """
+    在 out_dir 中查找匹配的字幕文件。
+    直接用字符串前缀匹配，不用 glob/fnmatch（文件名可能含 [ ] 等特殊字符）。
+    """
+    prefix = f"{stem}.{lang}"
+    results = []
+    for f in out_dir.iterdir():
+        name = f.name
+        # 匹配 {stem}.{lang}.srt / {stem}.{lang}.vtt / {stem}.{lang} 等
+        if name == prefix or name.startswith(prefix + "."):
+            results.append(f)
+    return sorted(results)
+
+
 def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     """
     用 yt-dlp 下载最佳视频+音频和字幕。
@@ -156,14 +170,40 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     # ---- 阶段 2: 逐个语言尝试下载字幕（容错）----
     # yt-dlp 在任一语言字幕下载失败时会报错退出，
     # 因此逐个语言单独尝试，避免一种语言 429 阻断其他语言。
+    #
+    # YouTube 自动字幕的语言代码可能是 zh-CN/zh-TW 而非 zh-Hans/zh，
+    # 因此先从 info 中提取可用字幕语言，再用前缀匹配找到最佳对应。
+    available_langs = set()
+    for src in (info.get("subtitles", {}), info.get("automatic_captions", {})):
+        available_langs.update(src.keys())
+
+    def match_subtitle_lang(requested: str, available: set[str]) -> str | None:
+        """精确匹配 > 前缀匹配（如 zh → zh-CN）。"""
+        if requested in available:
+            return requested
+        # 前缀匹配：requested="zh" 可匹配 "zh-CN"
+        matches = [a for a in available if a.startswith(requested)]
+        if matches:
+            # 优先返回简体中文变体
+            for pref in ("zh-CN", "zh-Hans", "zh"):
+                for m in matches:
+                    if m == pref:
+                        return m
+            return sorted(matches)[0]
+        return None
+
     print(f"[2/3] 下载字幕 (语言优先级: {', '.join(sub_lang_list)})")
     for lang in sub_lang_list:
+        matched = match_subtitle_lang(lang, available_langs)
+        if matched is None:
+            print(f"      字幕 '{lang}' 不存在（视频无该语言字幕）")
+            continue
         sub_opts = {
             "outtmpl": str(video_path.with_suffix("")),
             "skip_download": True,
             "writesubtitles": True,
             "writeautomaticsub": True,
-            "subtitleslangs": [lang],
+            "subtitleslangs": [matched],
             "subtitlesformat": "srt/best",
             "quiet": True,
         }
@@ -172,13 +212,12 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
                 ydl.extract_info(url, download=True)
             # 检查文件是否实际生成（yt-dlp 在无该语言字幕时会静默跳过）
             stem = video_path.stem
-            candidates = list(out_dir.glob(f"{stem}.{lang}.*"))
-            candidates += list(out_dir.glob(f"{stem}.{lang}"))
+            candidates = find_subtitle_files(out_dir, stem, matched)
             if candidates:
-                print(f"      字幕 '{lang}' 下载成功: {candidates[0].name}")
+                print(f"      字幕 '{lang}' → '{matched}' 下载成功: {candidates[0].name}")
                 break
             else:
-                print(f"      字幕 '{lang}' 不存在（视频无该语言字幕）")
+                print(f"      字幕 '{lang}' → '{matched}' 下载失败（文件未生成）")
                 continue
         except Exception as e:
             print(f"      字幕 '{lang}' 下载失败: {e}")
@@ -188,18 +227,21 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     subtitle: Path | None = None
     stem = video_path.stem
     for lang in sub_lang_list:
-        candidates = list(out_dir.glob(f"{stem}.{lang}.*"))
-        candidates += list(out_dir.glob(f"{stem}.{lang}"))
+        matched = match_subtitle_lang(lang, available_langs)
+        if matched is None:
+            continue
+        candidates = find_subtitle_files(out_dir, stem, matched)
         if candidates:
             subtitle = candidates[0]
             break
 
-    # fallback: 任意 srt/vtt
+    # fallback: 任意 srt/vtt/ass（直接字符串匹配，避免方括号特殊字符问题）
     if subtitle is None:
-        for ext in ("srt", "vtt", "ass"):
-            candidates = list(out_dir.glob(f"{stem}.*.{ext}"))
-            if candidates:
-                subtitle = candidates[0]
+        for f in out_dir.iterdir():
+            name = f.name
+            if name.startswith(f"{stem}.") and \
+               (name.endswith(".srt") or name.endswith(".vtt") or name.endswith(".ass")):
+                subtitle = f
                 break
 
     if subtitle:
@@ -301,8 +343,8 @@ def main() -> None:
         help="烧录硬字幕（不可关闭），默认为软字幕嵌入",
     )
     parser.add_argument(
-        "--sub-langs", default="zh-Hans,zh,en",
-        help="字幕语言，逗号分隔（默认 zh-Hans,zh,en）",
+        "--sub-langs", default="zh-CN,zh-TW,zh,en",
+        help="字幕语言，逗号分隔（默认 zh-CN,zh-TW,zh,en）",
     )
     parser.add_argument(
         "--keep-temp", action="store_true",
