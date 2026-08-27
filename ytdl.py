@@ -119,7 +119,7 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
     import yt_dlp
 
     sub_lang_list = [l.strip() for l in sub_langs.split(",") if l.strip()]
-    outtmpl = str(out_dir / "%(title)s.%(ext)s")
+    outtmpl = str(out_dir / "%(title)s - %(uploader)s.%(ext)s")
 
     # ---- 阶段 1: 下载视频+音频（不含字幕）----
     print(f"[1/3] 下载视频: {url}")
@@ -137,7 +137,8 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
         info = ydl.extract_info(url, download=True)
 
     title = info.get("title", "video")
-    safe_title = yt_dlp.utils.sanitize_filename(title, restricted=False)
+    uploader = info.get("uploader", info.get("channel", "unknown"))
+    safe_title = yt_dlp.utils.sanitize_filename(f"{title} - {uploader}", restricted=False)
     video_path = out_dir / f"{safe_title}.mkv"
 
     # 如果预期文件不存在，搜索目录中最近生成的 mkv
@@ -205,8 +206,7 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
         print(f"      字幕文件: {subtitle.name}")
     else:
         print("      未找到字幕（视频可能无字幕或字幕下载失败），将仅输出无字幕视频。")
-
-    return {"video_path": video_path, "subtitle": subtitle, "title": title}
+    return {"video_path": video_path, "subtitle": subtitle, "title": title, "uploader": uploader}
 
 
 def convert_to_srt(subtitle: Path, out_dir: Path) -> Path:
