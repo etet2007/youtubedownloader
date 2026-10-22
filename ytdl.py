@@ -118,7 +118,7 @@ def find_subtitle_files(out_dir: Path, stem: str, lang: str) -> list[Path]:
     return sorted(results)
 
 
-def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
+def download_media(url: str, out_dir: Path, sub_langs: str, cookies_from_browser: str | None = None) -> dict:
     """
     用 yt-dlp 下载最佳视频+音频和字幕。
 
@@ -141,10 +141,17 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
         "outtmpl": outtmpl,
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mkv",
+        # 分片下载稳健性：超时分片必须重试而不是跳过（跳过会导致文件损坏）
+        "retries": 10,
+        "fragment_retries": 10,
+        "skip_unavailable_fragments": False,
+        "socket_timeout": 30,
         "postprocessors": [
             {"key": "FFmpegVideoConvertor", "preferedformat": "mkv"},
         ],
     }
+    if cookies_from_browser:
+        video_opts["cookiesfrombrowser"] = (cookies_from_browser, None, None, None)
 
     info: dict = {}
     with yt_dlp.YoutubeDL(video_opts) as ydl:
@@ -206,7 +213,12 @@ def download_media(url: str, out_dir: Path, sub_langs: str) -> dict:
             "subtitleslangs": [matched],
             "subtitlesformat": "srt/best",
             "quiet": True,
+            # 匿名请求易被 IP 级 429 限流；EJS 挑战解算脚本配合浏览器
+            # 登录态 cookies 可绕过限流并解开 n-challenge（需 deno/node）
+            "remote_components": ["ejs:github"],
         }
+        if cookies_from_browser:
+            sub_opts["cookiesfrombrowser"] = (cookies_from_browser, None, None, None)
         try:
             with yt_dlp.YoutubeDL(sub_opts) as ydl:
                 ydl.extract_info(url, download=True)
@@ -350,6 +362,10 @@ def main() -> None:
         "--keep-temp", action="store_true",
         help="保留中间文件（原始 mkv、原始字幕）",
     )
+    parser.add_argument(
+        "--cookies-from-browser", default=None,
+        help="从浏览器读取 Cookie（如 chrome、firefox、safari），年龄限制视频需要",
+    )
     args = parser.parse_args()
 
     check_deps(burn=args.burn)
@@ -357,22 +373,25 @@ def main() -> None:
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    result = download_media(args.url, out_dir, args.sub_langs)
+    result = download_media(args.url, out_dir, args.sub_langs, args.cookies_from_browser)
     video_path: Path = result["video_path"]
     subtitle: Path | None = result["subtitle"]
 
+    # 清理时只删本次运行自己产生的中间文件，
+    # 避免并行下载共用输出目录时误删其他任务的文件。
+    known_files = {video_path}
+
     if subtitle and subtitle.suffix.lower() != ".srt":
         subtitle = convert_to_srt(subtitle, out_dir)
+        known_files.add(subtitle)
 
     final = merge_subtitles(video_path, subtitle, out_dir, args.burn)
 
     print(f"\n✓ 完成！最终视频: {final}")
 
     if not args.keep_temp:
-        for f in out_dir.glob("*"):
-            if f == final:
-                continue
-            if f.suffix.lower() in (".mkv", ".srt", ".vtt", ".ass"):
+        for f in known_files:
+            if f.exists() and f != final:
                 f.unlink(missing_ok=True)
 
 
